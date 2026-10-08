@@ -1,0 +1,899 @@
+import { getRoverMonitor } from "@/lib/rover";
+import { createSupabaseServerClient } from "@/lib/supabase/server";
+import {
+  businessDateKey,
+  startOfBusinessDay,
+  startOfBusinessMonth,
+  startOfBusinessWeek,
+  startOfBusinessYear,
+} from "@/lib/business-time";
+import {
+  calculateRecoveryProjection,
+  calculateRoiBreakdown,
+  getRecoveryTargetForPeriod,
+  isCapitalInvestmentType,
+  isOperatingExpenseType,
+} from "@/lib/finance";
+
+export type DashboardRange = "day" | "week" | "month" | "year";
+
+export type DashboardPoint = {
+  label: string;
+  value: number;
+};
+
+export type StockMovementPoint = {
+  label: string;
+  in: number;
+  out: number;
+  adjustment: number;
+};
+
+export type DashboardActivity = {
+  id: string;
+  action: string;
+  label: string;
+  detail: string;
+  metadata: string[];
+  value: string;
+  createdAt: string;
+  type: "sale" | "stock-in" | "stock-out" | "stock-adjustment";
+};
+
+export type DashboardRiskItem = {
+  id: string;
+  itemName: string;
+  category: string;
+  quantity: number;
+  unit: string;
+  status: "Out of Stock" | "Critical Stock" | "Low Stock";
+};
+
+export type OperationsDashboardData = {
+  range: DashboardRange;
+  salesAvailable: boolean;
+  salesError: string | null;
+  inventoryAvailable: boolean;
+  inventoryValueAvailable: boolean;
+  transactionsAvailable: boolean;
+  transactionsError: string | null;
+  cropsAvailable: boolean;
+  cropsError: string | null;
+  financeAvailable: boolean;
+  financeError: string | null;
+  summary: {
+    salesInRange: number;
+    transactionsInRange: number;
+    averageSale: number;
+    inventoryValue: number;
+    estimatedSalesValue: number;
+    investmentInRange: number;
+    capitalInvestmentInRange: number;
+    averageDailySales: number;
+    projectedAnnualSales: number;
+    recoveryRate: number;
+    recoveryStatus: "no-baseline" | "recovered" | "on-track" | "behind";
+    requiredDailySales: number;
+    requiredPeriodSales: number;
+    totalCapitalInvestment: number;
+    roi: number;
+    lowStockItems: number;
+    outOfStockItems: number;
+    totalCustomers: number;
+    activeCrops: number;
+    cropsNeedingAttention: number;
+    roverStatus: string;
+  };
+  insights: {
+    bestSellingItem: string;
+    strongestCategory: string;
+    preferredPaymentMethod: string;
+    stockWarning: string;
+    cropWarning: string;
+    roverWarning: string;
+  };
+  charts: {
+    salesTrend: DashboardPoint[];
+    salesByCategory: DashboardPoint[];
+    stockValueByCategory: DashboardPoint[];
+    stockMovement: StockMovementPoint[];
+    paymentMethods: DashboardPoint[];
+    topItems: DashboardPoint[];
+    cropStatus: DashboardPoint[];
+    roverSensors: DashboardPoint[];
+  };
+  recentActivity: DashboardActivity[];
+  lowStock: DashboardRiskItem[];
+  error: string | null;
+};
+
+type InventoryRow = {
+  id: string;
+  item_name: string;
+  category: string | null;
+  quantity: number | string;
+  unit: string;
+  minimum_quantity: number | string;
+  unit_cost: number | string | null;
+  selling_price: number | string | null;
+};
+
+type SalesOrderRow = {
+  id: string;
+  receipt_number: string;
+  sale_date: string;
+  customer_name: string | null;
+  payment_method: string;
+  total_amount: number | string;
+  status: string;
+  recorder?: { full_name: string | null } | { full_name: string | null }[] | null;
+  sales_order_items?: Array<{
+    item_name_snapshot: string;
+    unit_snapshot: string | null;
+    quantity_sold: number | string;
+    line_total: number | string;
+    inventory?: { category: string | null } | { category: string | null }[] | null;
+  }>;
+};
+
+type MarketSaleRow = {
+  id: string;
+  sale_date: string;
+  customer_name: string | null;
+  payment_method?: string | null;
+  quantity_sold: number | string;
+  total_amount: number | string;
+  status: string;
+  recorder?: { full_name: string | null } | { full_name: string | null }[] | null;
+  inventory: {
+    item_name: string;
+    category: string | null;
+    unit: string;
+  } | {
+    item_name: string;
+    category: string | null;
+    unit: string;
+  }[] | null;
+};
+
+type TransactionRow = {
+  id: string;
+  transaction_type: "IN" | "OUT" | "ADJUSTMENT";
+  quantity: number | string;
+  remarks: string | null;
+  source: string | null;
+  created_at: string;
+  performer?: { full_name: string | null } | { full_name: string | null }[] | null;
+  inventory: {
+    item_name: string;
+    unit: string;
+  } | {
+    item_name: string;
+    unit: string;
+  }[] | null;
+};
+
+type CropRow = {
+  crop_status: string;
+  growth_stage: string;
+};
+
+type ExpenseRow = {
+  id?: string;
+  amount: number | string;
+  expense_date: string;
+  expense_type?: string | null;
+};
+
+function toNumber(value: number | string | null | undefined) {
+  if (typeof value === "number") {
+    return value;
+  }
+
+  return Number(value ?? 0);
+}
+
+function firstRelation<T>(value: T | T[] | null | undefined) {
+  return Array.isArray(value) ? value[0] : value;
+}
+
+function isMissingPaymentMethodColumn(error: { message?: string } | null | undefined) {
+  return error?.message?.includes("sales_transactions.payment_method") ?? false;
+}
+
+function isMissingExpenseTypeColumn(error: { message?: string } | null | undefined) {
+  return error?.message?.includes("farm_expenses.expense_type") ?? false;
+}
+
+function orderItemSummary(items: SalesOrderRow["sales_order_items"]) {
+  const saleItems = items ?? [];
+
+  if (saleItems.length === 0) {
+    return "Sale items not available";
+  }
+
+  const firstItem = saleItems[0];
+  const quantity = toNumber(firstItem.quantity_sold);
+  const unit = firstItem.unit_snapshot;
+  const firstSummary = `${quantity}${unit ? ` ${unit}` : ""} ${firstItem.item_name_snapshot}`;
+
+  return saleItems.length === 1
+    ? firstSummary
+    : `${firstSummary} + ${saleItems.length - 1} more ${saleItems.length === 2 ? "item" : "items"}`;
+}
+
+function stockActivityDescription(transaction: TransactionRow) {
+  if (transaction.source === "void_sale") {
+    return "Stock restored after a sale was voided";
+  }
+
+  if (transaction.source === "harvest") {
+    return "Harvest quantity added to available stock";
+  }
+
+  if (transaction.transaction_type === "IN") {
+    return "Stock added manually";
+  }
+
+  if (transaction.transaction_type === "OUT") {
+    return "Stock removed manually";
+  }
+
+  return "Available quantity was corrected";
+}
+
+export function normalizeDashboardRange(value: string | string[] | undefined): DashboardRange {
+  const range = Array.isArray(value) ? value[0] : value;
+
+  if (range === "day" || range === "week" || range === "year") {
+    return range;
+  }
+
+  return "month";
+}
+
+export function getDashboardRangeStart(range: DashboardRange, now = new Date()) {
+  if (range === "day") return startOfBusinessDay(now);
+  if (range === "week") return startOfBusinessWeek(now);
+  if (range === "year") return startOfBusinessYear(now);
+  return startOfBusinessMonth(now);
+}
+
+async function fetchAllPages<T>(
+  fetchPage: (from: number, to: number) => PromiseLike<{
+    data: T[] | null;
+    error: { message: string } | null;
+  }>,
+) {
+  const rows: T[] = [];
+  const pageSize = 500;
+  for (let from = 0;; from += pageSize) {
+    const { data, error } = await fetchPage(from, from + pageSize - 1);
+    if (error) return { data: null, error };
+    const page = data ?? [];
+    rows.push(...page);
+    if (page.length < pageSize) return { data: rows, error: null };
+  }
+}
+
+function bucketLabel(value: string, range: DashboardRange) {
+  const date = new Date(value);
+
+  if (range === "day") {
+    return new Intl.DateTimeFormat("en-PH", {
+      hour: "numeric",
+      timeZone: "Asia/Manila",
+    }).format(date);
+  }
+
+  if (range === "year") {
+    return new Intl.DateTimeFormat("en-PH", {
+      month: "short",
+      timeZone: "Asia/Manila",
+    }).format(date);
+  }
+
+  return new Intl.DateTimeFormat("en-PH", {
+    month: "short",
+    day: "numeric",
+    timeZone: "Asia/Manila",
+  }).format(date);
+}
+
+function addToMap(map: Map<string, number>, key: string, value: number) {
+  map.set(key, (map.get(key) ?? 0) + value);
+}
+
+function rankedPoints(map: Map<string, number>, limit = 6, ascending = false) {
+  return [...map.entries()]
+    .sort((left, right) => (ascending ? left[1] - right[1] : right[1] - left[1]))
+    .slice(0, limit)
+    .map<DashboardPoint>(([label, value]) => ({ label, value }));
+}
+
+function stockStatus(row: InventoryRow): DashboardRiskItem["status"] | "In Stock" {
+  const quantity = toNumber(row.quantity);
+  const minimum = toNumber(row.minimum_quantity);
+
+  if (quantity <= 0) {
+    return "Out of Stock";
+  }
+
+  if (quantity <= minimum * 0.5) {
+    return "Critical Stock";
+  }
+
+  if (quantity <= minimum) {
+    return "Low Stock";
+  }
+
+  return "In Stock";
+}
+
+function customerKey(name: string | null | undefined) {
+  const normalized = (name ?? "").trim().toLowerCase();
+
+  if (!normalized || normalized === "walk-in customer" || normalized === "market distribution") {
+    return "";
+  }
+
+  return normalized;
+}
+
+function buildRecentActivity(
+  orders: SalesOrderRow[],
+  marketSales: MarketSaleRow[],
+  transactions: TransactionRow[],
+) {
+  const recentActivity: DashboardActivity[] = [];
+
+  for (const order of orders) {
+    recentActivity.push({
+      id: order.id,
+      action: "Sale completed",
+      label: order.receipt_number,
+      detail: orderItemSummary(order.sales_order_items),
+      metadata: [
+        order.customer_name ?? "Walk-in customer",
+        order.payment_method || "Payment not recorded",
+        `Recorded by ${firstRelation(order.recorder)?.full_name ?? "Unknown user"}`,
+      ],
+      value: toNumber(order.total_amount).toString(),
+      createdAt: order.sale_date,
+      type: "sale",
+    });
+  }
+
+  for (const sale of marketSales) {
+    const inventory = firstRelation(sale.inventory);
+    const itemName = inventory?.item_name ?? "Legacy inventory sale";
+    const unit = inventory?.unit;
+    const paymentMethod = sale.payment_method ?? "Not recorded";
+
+    recentActivity.push({
+      id: sale.id,
+      action: "Sale completed",
+      label: `LEGACY-${sale.id.slice(0, 8).toUpperCase()}`,
+      detail: `Sold ${toNumber(sale.quantity_sold)}${unit ? ` ${unit}` : ""} of ${itemName}`,
+      metadata: [
+        sale.customer_name ?? "Walk-in customer",
+        paymentMethod,
+        `Recorded by ${firstRelation(sale.recorder)?.full_name ?? "Unknown user"}`,
+      ],
+      value: toNumber(sale.total_amount).toString(),
+      createdAt: sale.sale_date,
+      type: "sale",
+    });
+  }
+
+  for (const transaction of transactions) {
+    if (transaction.source === "sale") {
+      continue;
+    }
+
+    const item = firstRelation(transaction.inventory);
+    const performer = firstRelation(transaction.performer)?.full_name ?? "Unknown user";
+    const sourceLabel = transaction.source === "void_sale"
+      ? "Voided sale"
+      : transaction.source === "harvest"
+        ? "Crop harvest"
+        : "Manual entry";
+    const type = transaction.transaction_type === "IN"
+      ? "stock-in"
+      : transaction.transaction_type === "OUT"
+        ? "stock-out"
+        : "stock-adjustment";
+    const quantity = toNumber(transaction.quantity);
+    const unit = item?.unit;
+    const value = transaction.transaction_type === "IN"
+      ? `+${quantity}${unit ? ` ${unit}` : ""}`
+      : transaction.transaction_type === "OUT"
+        ? `-${quantity}${unit ? ` ${unit}` : ""}`
+        : `Set to ${quantity}${unit ? ` ${unit}` : ""}`;
+
+    recentActivity.push({
+      id: transaction.id,
+      action: stockActivityDescription(transaction),
+      label: item?.item_name ?? "Inventory item",
+      detail: transaction.remarks?.trim() || "No additional notes",
+      metadata: [sourceLabel, `Recorded by ${performer}`],
+      value: value.trim(),
+      createdAt: transaction.created_at,
+      type,
+    });
+  }
+
+  return recentActivity
+    .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime())
+    .slice(0, 24);
+}
+
+function emptyData(range: DashboardRange, error: string | null): OperationsDashboardData {
+  return {
+    range,
+    salesAvailable: false,
+    salesError: error,
+    inventoryAvailable: false,
+    inventoryValueAvailable: false,
+    transactionsAvailable: false,
+    transactionsError: error,
+    cropsAvailable: false,
+    cropsError: error,
+    financeAvailable: false,
+    financeError: error,
+    summary: {
+      salesInRange: 0,
+      transactionsInRange: 0,
+      averageSale: 0,
+      inventoryValue: 0,
+      estimatedSalesValue: 0,
+      investmentInRange: 0,
+      capitalInvestmentInRange: 0,
+      averageDailySales: 0,
+      projectedAnnualSales: 0,
+      recoveryRate: 0,
+      recoveryStatus: "no-baseline",
+      requiredDailySales: 0,
+      requiredPeriodSales: 0,
+      totalCapitalInvestment: 0,
+      roi: 0,
+      lowStockItems: 0,
+      outOfStockItems: 0,
+      totalCustomers: 0,
+      activeCrops: 0,
+      cropsNeedingAttention: 0,
+      roverStatus: "Unknown",
+    },
+    insights: {
+      bestSellingItem: "No sales yet",
+      strongestCategory: "No category sales yet",
+      preferredPaymentMethod: "Not recorded",
+      stockWarning: "No stock records connected yet",
+      cropWarning: "No crop records connected yet",
+      roverWarning: "No active rover status",
+    },
+    charts: {
+      salesTrend: [],
+      salesByCategory: [],
+      stockValueByCategory: [],
+      stockMovement: [],
+      paymentMethods: [],
+      topItems: [],
+      cropStatus: [],
+      roverSensors: [],
+    },
+    recentActivity: [],
+    lowStock: [],
+    error,
+  };
+}
+
+export async function getOperationsDashboard(range: DashboardRange) {
+  const supabase = await createSupabaseServerClient();
+
+  if (!supabase) {
+    return emptyData(range, "Supabase is not configured.");
+  }
+
+  const assessmentNow = new Date();
+  const start = getDashboardRangeStart(range, assessmentNow);
+  const startIso = start.toISOString();
+  const asOfIso = assessmentNow.toISOString();
+  const startDate = businessDateKey(start);
+  const expensesResultWithType = await fetchAllPages<ExpenseRow>((from, to) => supabase
+    .from("farm_expenses")
+    .select("id, amount, expense_date, expense_type")
+    .order("expense_date", { ascending: true })
+    .order("id", { ascending: true })
+    .range(from, to)
+    .returns<ExpenseRow[]>());
+  const expensesResult = isMissingExpenseTypeColumn(expensesResultWithType.error)
+    ? await fetchAllPages<ExpenseRow>((from, to) => supabase
+        .from("farm_expenses")
+        .select("id, amount, expense_date")
+        .order("expense_date", { ascending: true })
+        .order("id", { ascending: true })
+        .range(from, to)
+        .returns<ExpenseRow[]>())
+    : expensesResultWithType;
+  const expenseRows = expensesResult.error ? [] : expensesResult.data ?? [];
+  const capitalExpenseRows = expenseRows.filter((expense) => isCapitalInvestmentType(expense.expense_type));
+  const totalCapitalInvestment = capitalExpenseRows.reduce((total, row) => total + toNumber(row.amount), 0);
+  const investmentStartDate = capitalExpenseRows[0]?.expense_date ?? null;
+  const investmentStartIso = investmentStartDate
+    ? startOfBusinessDay(new Date(`${investmentStartDate}T12:00:00+08:00`)).toISOString()
+    : startIso;
+  const salesStartIso = new Date(investmentStartIso).getTime() < start.getTime() ? investmentStartIso : startIso;
+  const investmentInRange = expenseRows
+    .filter((expense) => expense.expense_date >= startDate)
+    .reduce((total, row) => total + toNumber(row.amount), 0);
+
+  const [
+    recentTransactionsResult,
+    recentOrdersResult,
+    recentMarketResultWithPayment,
+    roverResult,
+  ] = await Promise.all([
+    supabase
+      .from("inventory_transactions")
+      .select("id, transaction_type, quantity, remarks, source, created_at, inventory(item_name, unit), performer:profiles!inventory_transactions_performed_by_fkey(full_name)")
+      .order("created_at", { ascending: false })
+      .limit(48)
+      .returns<TransactionRow[]>(),
+    supabase
+      .from("sales_orders")
+      .select(
+        "id, receipt_number, sale_date, customer_name, payment_method, total_amount, status, recorder:profiles!sales_orders_recorded_by_fkey(full_name), sales_order_items(item_name_snapshot, unit_snapshot, quantity_sold, line_total, inventory(category))",
+      )
+      .eq("status", "Completed")
+      .order("sale_date", { ascending: false })
+      .limit(48)
+      .returns<SalesOrderRow[]>(),
+    supabase
+      .from("sales_transactions")
+      .select("id, sale_date, customer_name, payment_method, quantity_sold, total_amount, status, recorder:profiles!sales_transactions_recorded_by_fkey(full_name), inventory(item_name, category, unit)")
+      .eq("status", "Completed")
+      .order("sale_date", { ascending: false })
+      .limit(48)
+      .returns<MarketSaleRow[]>(),
+    getRoverMonitor(),
+  ]);
+
+  const inventoryResult = await fetchAllPages<InventoryRow>((from, to) => supabase
+    .from("inventory")
+    .select("id, item_name, category, quantity, unit, minimum_quantity, unit_cost, selling_price")
+    .order("item_name", { ascending: true })
+    .order("id", { ascending: true })
+    .range(from, to)
+    .returns<InventoryRow[]>());
+  const cropsResult = await fetchAllPages<CropRow>((from, to) => supabase
+    .from("crops")
+    .select("id, crop_status, growth_stage")
+    .order("id", { ascending: true })
+    .range(from, to)
+    .returns<CropRow[]>());
+
+  const ordersResult = await fetchAllPages<SalesOrderRow>((from, to) => supabase
+    .from("sales_orders")
+    .select("id, receipt_number, sale_date, customer_name, payment_method, total_amount, status, recorder:profiles!sales_orders_recorded_by_fkey(full_name), sales_order_items(item_name_snapshot, unit_snapshot, quantity_sold, line_total, inventory(category))")
+    .gte("sale_date", salesStartIso)
+    .lt("sale_date", asOfIso)
+    .order("sale_date", { ascending: false })
+    .order("id", { ascending: true })
+    .range(from, to)
+    .returns<SalesOrderRow[]>());
+  const marketResultWithPayment = await fetchAllPages<MarketSaleRow>((from, to) => supabase
+    .from("sales_transactions")
+    .select("id, sale_date, customer_name, payment_method, quantity_sold, total_amount, status, recorder:profiles!sales_transactions_recorded_by_fkey(full_name), inventory(item_name, category, unit)")
+    .gte("sale_date", salesStartIso)
+    .lt("sale_date", asOfIso)
+    .order("sale_date", { ascending: false })
+    .order("id", { ascending: true })
+    .range(from, to)
+    .returns<MarketSaleRow[]>());
+  const marketResult = isMissingPaymentMethodColumn(marketResultWithPayment.error)
+    ? await fetchAllPages<MarketSaleRow>((from, to) => supabase
+        .from("sales_transactions")
+        .select("id, sale_date, customer_name, quantity_sold, total_amount, status, recorder:profiles!sales_transactions_recorded_by_fkey(full_name), inventory(item_name, category, unit)")
+        .gte("sale_date", salesStartIso)
+        .lt("sale_date", asOfIso)
+        .order("sale_date", { ascending: false })
+        .order("id", { ascending: true })
+        .range(from, to)
+        .returns<MarketSaleRow[]>())
+      : marketResultWithPayment;
+  const transactionsResult = await fetchAllPages<TransactionRow>((from, to) => supabase
+    .from("inventory_transactions")
+    .select("id, transaction_type, quantity, remarks, source, created_at, inventory(item_name, unit), performer:profiles!inventory_transactions_performed_by_fkey(full_name)")
+    .gte("created_at", startIso)
+    .lt("created_at", asOfIso)
+    .order("created_at", { ascending: false })
+    .order("id", { ascending: true })
+    .range(from, to)
+    .returns<TransactionRow[]>());
+  const recentMarketResult = isMissingPaymentMethodColumn(recentMarketResultWithPayment.error)
+    ? await supabase
+        .from("sales_transactions")
+        .select("id, sale_date, customer_name, quantity_sold, total_amount, status, recorder:profiles!sales_transactions_recorded_by_fkey(full_name), inventory(item_name, category, unit)")
+        .eq("status", "Completed")
+        .order("sale_date", { ascending: false })
+        .limit(48)
+        .returns<MarketSaleRow[]>()
+    : recentMarketResultWithPayment;
+
+  if (inventoryResult.error) {
+    return emptyData(range, inventoryResult.error.message);
+  }
+
+  const inventoryRows = inventoryResult.data ?? [];
+  const orderRows = ordersResult.error ? [] : ordersResult.data ?? [];
+  const marketRows = marketResult.error ? [] : marketResult.data ?? [];
+  const transactionRows = transactionsResult.error ? [] : transactionsResult.data ?? [];
+  const recentOrderRows = recentOrdersResult.error ? [] : recentOrdersResult.data ?? [];
+  const recentMarketRows = recentMarketResult.error ? [] : recentMarketResult.data ?? [];
+  const recentTransactionRows = recentTransactionsResult.error ? [] : recentTransactionsResult.data ?? [];
+  const cropRows = cropsResult.error ? [] : cropsResult.data ?? [];
+
+  const stockValueByCategory = new Map<string, number>();
+  const lowStock: DashboardRiskItem[] = [];
+  let inventoryValue = 0;
+  let estimatedSalesValue = 0;
+
+  for (const row of inventoryRows) {
+    const quantity = toNumber(row.quantity);
+    const unitCost = toNumber(row.unit_cost);
+    const sellingPrice = toNumber(row.selling_price);
+    const category = row.category ?? "Uncategorized";
+    const value = quantity * unitCost;
+    const status = stockStatus(row);
+
+    inventoryValue += value;
+    estimatedSalesValue += quantity * sellingPrice;
+    addToMap(stockValueByCategory, category, value);
+
+    if (status !== "In Stock") {
+      lowStock.push({
+        id: row.id,
+        itemName: row.item_name,
+        category,
+        quantity,
+        unit: row.unit,
+        status,
+      });
+    }
+  }
+
+  const salesTrend = new Map<string, number>();
+  const salesByCategory = new Map<string, number>();
+  const paymentMethods = new Map<string, number>();
+  const topItems = new Map<string, number>();
+  const customers = new Set<string>();
+  let salesInRange = 0;
+  let recoveredSales = 0;
+  let transactionsInRange = 0;
+
+  for (const order of orderRows) {
+    if (order.status !== "Completed") {
+      continue;
+    }
+
+    const total = toNumber(order.total_amount);
+    const items = order.sales_order_items ?? [];
+
+    if (investmentStartDate && new Date(order.sale_date).getTime() >= new Date(investmentStartIso).getTime()) {
+      recoveredSales += total;
+    }
+
+    if (new Date(order.sale_date).getTime() < start.getTime()) {
+      continue;
+    }
+
+    salesInRange += total;
+    transactionsInRange += 1;
+    addToMap(salesTrend, bucketLabel(order.sale_date, range), total);
+    addToMap(paymentMethods, order.payment_method, total);
+
+    const key = customerKey(order.customer_name);
+    if (key) {
+      customers.add(key);
+    }
+
+    for (const item of items) {
+      const category = firstRelation(item.inventory)?.category?.trim() || "Uncategorized";
+      const lineTotal = toNumber(item.line_total);
+      addToMap(salesByCategory, category, lineTotal);
+      const itemLabel = item.unit_snapshot
+        ? `${item.item_name_snapshot} (${item.unit_snapshot})`
+        : item.item_name_snapshot;
+      addToMap(topItems, itemLabel, toNumber(item.quantity_sold));
+    }
+  }
+
+  for (const sale of marketRows) {
+    if (sale.status !== "Completed") {
+      continue;
+    }
+
+    const total = toNumber(sale.total_amount);
+    const inventory = firstRelation(sale.inventory);
+    const itemName = inventory?.item_name ?? "Legacy inventory sale";
+    const itemLabel = inventory?.unit ? `${itemName} (${inventory.unit})` : itemName;
+    const category = inventory?.category?.trim() || "Uncategorized";
+    const paymentMethod = sale.payment_method ?? "Not recorded";
+
+    if (investmentStartDate && new Date(sale.sale_date).getTime() >= new Date(investmentStartIso).getTime()) {
+      recoveredSales += total;
+    }
+
+    if (new Date(sale.sale_date).getTime() < start.getTime()) {
+      continue;
+    }
+
+    salesInRange += total;
+    transactionsInRange += 1;
+    addToMap(salesTrend, bucketLabel(sale.sale_date, range), total);
+    addToMap(paymentMethods, paymentMethod, total);
+    addToMap(salesByCategory, category, total);
+    addToMap(topItems, itemLabel, toNumber(sale.quantity_sold));
+
+    const key = customerKey(sale.customer_name);
+    if (key) {
+      customers.add(key);
+    }
+
+  }
+
+  const stockMovementMap = new Map<string, StockMovementPoint>();
+
+  for (const transaction of transactionRows) {
+    const label = bucketLabel(transaction.created_at, range);
+    const current = stockMovementMap.get(label) ?? {
+      label,
+      in: 0,
+      out: 0,
+      adjustment: 0,
+    };
+    if (transaction.transaction_type === "IN") {
+      current.in += 1;
+    } else if (transaction.transaction_type === "OUT") {
+      current.out += 1;
+    } else {
+      current.adjustment += 1;
+    }
+
+    stockMovementMap.set(label, current);
+
+  }
+
+  const cropStatus = new Map<string, number>();
+  for (const crop of cropRows) {
+    addToMap(cropStatus, crop.crop_status || "Uncategorized", 1);
+  }
+
+  const roverSensors = roverResult.sensors
+    ? [
+        { label: "Soil moisture", value: roverResult.sensors.soilMoisture },
+        { label: "Soil temp", value: roverResult.sensors.soilTemperature },
+        { label: "Humidity", value: roverResult.sensors.humidity },
+        { label: "Environment", value: roverResult.sensors.environmentalTemperature },
+      ].filter((point): point is DashboardPoint => typeof point.value === "number" && Number.isFinite(point.value))
+    : [];
+
+  const sortedRecentActivity = buildRecentActivity(
+    recentOrderRows,
+    recentMarketRows,
+    recentTransactionRows,
+  );
+  const topItemPoints = rankedPoints(topItems, 6);
+  const salesByCategoryPoints = rankedPoints(salesByCategory, 6);
+  const paymentPoints = rankedPoints(paymentMethods, 5);
+  const activeCrops = cropRows.filter((crop) =>
+    crop.crop_status !== "Harvested" && crop.crop_status !== "Cancelled",
+  ).length;
+  const cropsNeedingAttention = cropRows.filter((crop) => crop.crop_status === "Needs Attention").length;
+  const outOfStockItems = lowStock.filter((item) => item.status === "Out of Stock").length;
+  const capitalInvestmentInRange = expenseRows
+    .filter((expense) => expense.expense_date >= startDate && isCapitalInvestmentType(expense.expense_type))
+    .reduce((total, expense) => total + toNumber(expense.amount), 0);
+  const operatingExpensesInRange = expenseRows
+    .filter((expense) => expense.expense_date >= startDate && isOperatingExpenseType(expense.expense_type))
+    .reduce((total, expense) => total + toNumber(expense.amount), 0);
+  const operatingExpensesSinceInvestment = investmentStartDate
+    ? expenseRows
+        .filter((expense) => expense.expense_date >= investmentStartDate && isOperatingExpenseType(expense.expense_type))
+        .reduce((total, expense) => total + toNumber(expense.amount), 0)
+    : 0;
+  const roiBreakdown = calculateRoiBreakdown(
+    Math.max(0, salesInRange - operatingExpensesInRange),
+    capitalInvestmentInRange,
+  );
+  const recoveryProjection = calculateRecoveryProjection({
+    periodSales: salesInRange,
+    periodStart: start,
+    recoveredSales: Math.max(0, recoveredSales - operatingExpensesSinceInvestment),
+    totalInvestment: totalCapitalInvestment,
+  });
+  const requiredPeriodSales = getRecoveryTargetForPeriod(recoveryProjection.remainingInvestment, range)
+    + operatingExpensesInRange;
+
+  return {
+    range,
+    salesAvailable: !ordersResult.error && !marketResult.error,
+    salesError: ordersResult.error?.message ?? marketResult.error?.message ?? null,
+    inventoryAvailable: !inventoryResult.error,
+    inventoryValueAvailable: !inventoryResult.error && (inventoryResult.data ?? []).every((row) => row.unit_cost !== null),
+    transactionsAvailable: !transactionsResult.error,
+    transactionsError: transactionsResult.error?.message ?? null,
+    cropsAvailable: !cropsResult.error,
+    cropsError: cropsResult.error?.message ?? null,
+    financeAvailable: !expensesResult.error && !ordersResult.error && !marketResult.error,
+    financeError: expensesResult.error?.message ?? ordersResult.error?.message ?? marketResult.error?.message ?? null,
+    summary: {
+      salesInRange,
+      transactionsInRange,
+      averageSale: transactionsInRange > 0 ? salesInRange / transactionsInRange : 0,
+      inventoryValue,
+      estimatedSalesValue,
+      investmentInRange,
+      capitalInvestmentInRange,
+      averageDailySales: recoveryProjection.averageDailySales,
+      projectedAnnualSales: recoveryProjection.projectedAnnualSales,
+      recoveryRate: recoveryProjection.recoveryRate,
+      recoveryStatus: recoveryProjection.status,
+      requiredDailySales: recoveryProjection.requiredDailySales,
+      requiredPeriodSales,
+      totalCapitalInvestment,
+      roi: roiBreakdown.roi,
+      lowStockItems: lowStock.length,
+      outOfStockItems,
+      totalCustomers: customers.size,
+      activeCrops,
+      cropsNeedingAttention,
+      roverStatus: roverResult.status?.roverStatus ?? "Unknown",
+    },
+    insights: {
+      bestSellingItem: topItemPoints[0]?.label ?? "No sales yet",
+      strongestCategory: salesByCategoryPoints[0]?.label ?? "No category sales yet",
+      preferredPaymentMethod: paymentPoints[0]?.label ?? "Not recorded",
+      stockWarning:
+        inventoryResult.error
+          ? "Inventory data unavailable"
+          : lowStock.length > 0
+          ? `${lowStock.length} item${lowStock.length === 1 ? "" : "s"} need stock attention`
+          : "Stock levels look stable",
+      cropWarning:
+        cropsResult.error
+          ? "Crop data unavailable"
+          : cropsNeedingAttention > 0
+          ? `${cropsNeedingAttention} crop${cropsNeedingAttention === 1 ? "" : "s"} need attention`
+          : "Crop records look stable",
+      roverWarning: roverResult.error
+        ? "Rover status unavailable"
+        : roverResult.status
+        ? `${roverResult.status.roverStatus} · ${roverResult.status.currentActivity}`
+        : "No active rover status",
+    },
+    charts: {
+      salesTrend: [...salesTrend.entries()].map(([label, value]) => ({ label, value })),
+      salesByCategory: salesByCategoryPoints,
+      stockValueByCategory: rankedPoints(stockValueByCategory, 6),
+      stockMovement: [...stockMovementMap.values()],
+      paymentMethods: paymentPoints,
+      topItems: topItemPoints,
+      cropStatus: rankedPoints(cropStatus, 6),
+      roverSensors,
+    },
+    recentActivity: sortedRecentActivity,
+    lowStock: lowStock.slice(0, 6),
+    error:
+      ordersResult.error?.message ??
+      marketResult.error?.message ??
+      transactionsResult.error?.message ??
+      recentTransactionsResult.error?.message ??
+      recentOrdersResult.error?.message ??
+      recentMarketResult.error?.message ??
+      cropsResult.error?.message ??
+      roverResult.error ??
+      null,
+  } satisfies OperationsDashboardData;
+}

@@ -1,0 +1,25 @@
+.brand {
+  display: inline-grid;
+  align-items: center;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.logo {
+  grid-area: 1 / 1;
+  width: min(100%, 138px);
+  height: auto;
+  object-fit: contain;
+}
+
+.logoLight {
+  display: none;
+}
+
+:global(html[data-theme="light"]) .logoDark {
+  display: none;
+}
+
+:global(html[data-theme="light"]) .logoLight {
+  display: block;
+}

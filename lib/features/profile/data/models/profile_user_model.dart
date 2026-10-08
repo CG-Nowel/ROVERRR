@@ -1,0 +1,164 @@
+import 'dart:typed_data';
+
+enum ProfileAccountStatus {
+  active,
+  inactive;
+
+  String get label {
+    return switch (this) {
+      ProfileAccountStatus.active => 'Active',
+      ProfileAccountStatus.inactive => 'Inactive',
+    };
+  }
+}
+
+enum ProfileUserFilter {
+  all,
+  active,
+  inactive,
+  administrator,
+  plantingManager,
+  inventoryManager,
+  farmStaff;
+
+  String get label {
+    return switch (this) {
+      ProfileUserFilter.all => 'All Users',
+      ProfileUserFilter.active => 'Active',
+      ProfileUserFilter.inactive => 'Inactive',
+      ProfileUserFilter.administrator => 'Admin',
+      ProfileUserFilter.plantingManager => 'Planting',
+      ProfileUserFilter.inventoryManager => 'Inventory',
+      ProfileUserFilter.farmStaff => 'Staff',
+    };
+  }
+}
+
+enum ProfileActivityFilter {
+  today,
+  thisWeek,
+  thisMonth;
+
+  String get label {
+    return switch (this) {
+      ProfileActivityFilter.today => 'Today',
+      ProfileActivityFilter.thisWeek => 'This Week',
+      ProfileActivityFilter.thisMonth => 'This Month',
+    };
+  }
+}
+
+class ProfileUserModel {
+  const ProfileUserModel({
+    required this.id,
+    required this.employeeId,
+    required this.fullName,
+    required this.username,
+    required this.email,
+    required this.contactNumber,
+    required this.roleName,
+    required this.dateJoined,
+    required this.status,
+    this.firstName,
+    this.middleInitial,
+    this.lastName,
+    this.profileImagePath,
+    this.profileImageUrl,
+    this.hasProfilePicture = true,
+  });
+
+  final String id;
+  final String employeeId;
+  final String fullName;
+  final String username;
+  final String email;
+  final String contactNumber;
+  final String roleName;
+  final DateTime dateJoined;
+  final ProfileAccountStatus status;
+  final String? firstName;
+  final String? middleInitial;
+  final String? lastName;
+  final String? profileImagePath;
+  final String? profileImageUrl;
+  final bool hasProfilePicture;
+
+  bool get isActive => status == ProfileAccountStatus.active;
+
+  ProfileUserModel copyWith({
+    String? fullName,
+    String? firstName,
+    String? middleInitial,
+    String? lastName,
+    String? contactNumber,
+    String? roleName,
+    ProfileAccountStatus? status,
+    Object? profileImagePath = _noChange,
+    Object? profileImageUrl = _noChange,
+    bool? hasProfilePicture,
+  }) {
+    return ProfileUserModel(
+      id: id,
+      employeeId: employeeId,
+      fullName: fullName ?? this.fullName,
+      firstName: firstName ?? this.firstName,
+      middleInitial: middleInitial ?? this.middleInitial,
+      lastName: lastName ?? this.lastName,
+      username: username,
+      email: email,
+      contactNumber: contactNumber ?? this.contactNumber,
+      roleName: roleName ?? this.roleName,
+      dateJoined: dateJoined,
+      status: status ?? this.status,
+      profileImagePath: profileImagePath == _noChange
+          ? this.profileImagePath
+          : profileImagePath as String?,
+      profileImageUrl: profileImageUrl == _noChange
+          ? this.profileImageUrl
+          : profileImageUrl as String?,
+      hasProfilePicture: hasProfilePicture ?? this.hasProfilePicture,
+    );
+  }
+}
+
+class ProfileImageUpload {
+  const ProfileImageUpload({
+    required this.bytes,
+    required this.fileName,
+    required this.mimeType,
+  });
+
+  final Uint8List bytes;
+  final String fileName;
+  final String mimeType;
+}
+
+const _noChange = Object();
+
+class ProfileActivityModel {
+  const ProfileActivityModel({
+    required this.title,
+    required this.description,
+    required this.timestamp,
+    required this.module,
+  });
+
+  final String title;
+  final String description;
+  final DateTime timestamp;
+  final String module;
+}
+
+class ProfileStatModel {
+  const ProfileStatModel({
+    required this.label,
+    required this.value,
+    required this.context,
+    required this.iconKey,
+  });
+
+  final String label;
+  final String value;
+  final String context;
+  final String iconKey;
+}

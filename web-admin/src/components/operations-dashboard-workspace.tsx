@@ -1,0 +1,492 @@
+"use client";
+
+import { useState } from "react";
+import Link from "next/link";
+import {
+  Package,
+  ArrowRight,
+  PackageMinus,
+  PackagePlus,
+  AlertTriangle,
+  PackageX,
+  ReceiptText,
+  SlidersHorizontal,
+  TrendingUp,
+  ChevronLeft,
+  ChevronRight,
+} from "lucide-react";
+import {
+  Area,
+  AreaChart,
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Cell,
+  Pie,
+  PieChart,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
+import { CountUpValue } from "@/components/count-up-value";
+import type {
+  DashboardPoint,
+  DashboardRange,
+  OperationsDashboardData,
+  StockMovementPoint,
+} from "@/lib/dashboard";
+import { formatCurrency, formatDateTime } from "@/lib/format";
+import styles from "@/app/(portal)/dashboard/page.module.css";
+
+const ranges: Array<{ label: string; value: DashboardRange }> = [
+  { label: "Day", value: "day" },
+  { label: "Week", value: "week" },
+  { label: "Month", value: "month" },
+  { label: "Year", value: "year" },
+];
+
+const chartColors = [
+  "var(--chart-series-1)",
+  "var(--chart-series-2)",
+  "var(--chart-series-3)",
+  "var(--chart-series-4)",
+  "var(--chart-series-5)",
+  "var(--chart-series-6)",
+];
+const chartFillColors = [
+  "var(--chart-fill-1)",
+  "var(--chart-fill-2)",
+  "var(--chart-fill-3)",
+  "var(--chart-fill-4)",
+  "var(--chart-fill-5)",
+  "var(--chart-fill-6)",
+];
+
+type OperationsDashboardWorkspaceProps = {
+  canViewInvestments: boolean;
+  isInventoryManager: boolean;
+  data: OperationsDashboardData;
+};
+
+export function OperationsDashboardWorkspace({ canViewInvestments, isInventoryManager, data }: OperationsDashboardWorkspaceProps) {
+  const [activityPage, setActivityPage] = useState(1);
+  const activityPageSize = 3;
+  const activityPageCount = Math.max(1, Math.ceil(data.recentActivity.length / activityPageSize));
+  const visibleActivity = data.recentActivity.slice(
+    (activityPage - 1) * activityPageSize,
+    activityPage * activityPageSize,
+  );
+  const rangeLabel = data.range === "day"
+    ? "Daily"
+    : data.range === "week"
+      ? "Weekly"
+      : data.range === "month"
+        ? "Monthly"
+        : "Yearly";
+  const summaryCards = [
+    {
+      icon: <TrendingUp size={20} />,
+      label: "Sales total",
+      value: data.salesAvailable ? data.summary.salesInRange : "Unavailable",
+      currency: true,
+    },
+    {
+      icon: <ReceiptText size={20} />,
+      label: "Transactions",
+      value: data.salesAvailable ? data.summary.transactionsInRange : "Unavailable",
+    },
+    ...(canViewInvestments ? [{
+      icon: <Package size={20} />,
+      label: "Inventory value",
+      value: data.inventoryAvailable
+        ? data.inventoryValueAvailable ? data.summary.inventoryValue : "Incomplete"
+        : "Unavailable",
+      currency: true,
+    },
+    {
+      icon: <TrendingUp size={20} />,
+      label: `${rangeLabel} ROI`,
+      value: data.financeAvailable ? data.summary.roi : "Unavailable",
+      suffix: "%",
+    }] : []),
+    ...(isInventoryManager ? [
+      {
+        icon: <AlertTriangle size={20} />,
+        label: "Low-stock items",
+        value: data.inventoryAvailable ? data.summary.lowStockItems : "Unavailable",
+      },
+      {
+        icon: <PackageX size={20} />,
+        label: "Out-of-stock items",
+        value: data.inventoryAvailable ? data.summary.outOfStockItems : "Unavailable",
+      },
+    ] : []),
+  ];
+
+  return (
+    <>
+      <div className={styles.dashboardLayout}>
+        <div className={styles.dashboardOverview}>
+          <section className={styles.rangePanel} aria-label="Dashboard range selector">
+            <div>
+              <h2>Farm overview</h2>
+            </div>
+            <div className={styles.rangeTabs} aria-label="Select dashboard date range">
+              {ranges.map((range) => (
+                <Link
+                  aria-current={data.range === range.value ? "page" : undefined}
+                  className={data.range === range.value ? styles.rangeTabActive : styles.rangeTab}
+                  href={`/dashboard?range=${range.value}`}
+                  key={range.value}
+                >
+                  {range.label}
+                </Link>
+              ))}
+            </div>
+          </section>
+
+          <section className={styles.metricGrid} aria-label="Operations summary">
+            {summaryCards.map((card) => (
+              <article className={styles.metric} key={card.label}>
+                <div className={styles.metricMeta}>
+                  <span className={styles.metricIcon}>{card.icon}</span>
+                  <p>{card.label}</p>
+                </div>
+                <div className={styles.metricValue}>
+                  {typeof card.value === "number" ? (
+                    <CountUpValue className="mono" currency={card.currency} value={card.value} suffix={card.suffix} />
+                  ) : <span>{card.value}</span>}
+                </div>
+              </article>
+            ))}
+          </section>
+
+        </div>
+
+        <aside className={styles.priorityRail} aria-label="Priority operational details">
+          <article className={styles.listPanel}>
+            <div className={styles.sectionHeader}>
+              <div>
+                <p className={styles.eyebrow}>Inventory</p>
+                <h2>Low stock items</h2>
+              </div>
+              <span className={styles.panelPill}>{data.insights.stockWarning}</span>
+            </div>
+            {data.lowStock.length > 0 ? (
+              <div className={styles.riskList}>
+                {data.lowStock.map((item) => (
+                  <div className={styles.riskItem} data-status={item.status} key={item.id}>
+                    <div>
+                      <strong>{item.itemName}</strong>
+                      <span>{item.category}</span>
+                    </div>
+                    <div className={styles.riskQuantity} aria-label={`${item.quantity} ${item.unit}`}>
+                      <strong>{item.quantity}</strong>
+                      <span>{item.unit}</span>
+                    </div>
+                    <div className={styles.riskItemAction}>
+                      <em>{item.status}</em>
+                      <Link
+                        aria-label={`Open ${item.itemName} in inventory`}
+                        className={styles.riskItemLink}
+                        href={`/inventory?item=${encodeURIComponent(item.id)}`}
+                        title={`View ${item.itemName}`}
+                      >
+                        <ArrowRight size={17} aria-hidden="true" />
+                      </Link>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <EmptyState text={data.inventoryAvailable ? "No low-stock items." : "Inventory data unavailable."} />
+            )}
+          </article>
+
+          <article className={styles.listPanel}>
+            <div className={`${styles.sectionHeader} ${styles.activitySectionHeader}`}>
+              <div>
+                <p className={styles.eyebrow}>Activity</p>
+                <h2>Recent activity</h2>
+              </div>
+              {activityPageCount > 1 ? (
+                <nav className={styles.activityPagination} aria-label="Recent activity pagination">
+                  <button
+                    aria-label="Previous activity page"
+                    disabled={activityPage === 1}
+                    type="button"
+                    onClick={() => setActivityPage((page) => Math.max(1, page - 1))}
+                  >
+                    <ChevronLeft size={16} />
+                  </button>
+                  <span>Page {activityPage} of {activityPageCount}</span>
+                  <button
+                    aria-label="Next activity page"
+                    disabled={activityPage === activityPageCount}
+                    type="button"
+                    onClick={() => setActivityPage((page) => Math.min(activityPageCount, page + 1))}
+                  >
+                    <ChevronRight size={16} />
+                  </button>
+                </nav>
+              ) : null}
+            </div>
+            {data.recentActivity.length > 0 ? (
+              <div className={styles.activityList}>
+                {visibleActivity.map((activity) => (
+                  <div className={styles.activityItem} data-type={activity.type} key={`${activity.type}-${activity.id}`}>
+                    <span className={styles.activityIcon}>
+                      {activity.type === "sale" ? <ReceiptText size={17} /> : null}
+                      {activity.type === "stock-in" ? <PackagePlus size={17} /> : null}
+                      {activity.type === "stock-out" ? <PackageMinus size={17} /> : null}
+                      {activity.type === "stock-adjustment" ? <SlidersHorizontal size={17} /> : null}
+                    </span>
+                    <div className={styles.activityContent}>
+                      <div className={styles.activityHeading}>
+                        <strong>{activity.action}</strong>
+                        <span className={styles.activityLabel}>{activity.label}</span>
+                      </div>
+                    </div>
+                    <div className={styles.activityValue}>
+                      <strong>
+                        {activity.type === "sale"
+                          ? formatCurrency(Number(activity.value))
+                          : activity.value}
+                      </strong>
+                      <p>{formatDateTime(activity.createdAt)}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <EmptyState text="No recent sales or stock movement in this range." />
+            )}
+          </article>
+        </aside>
+
+        <section className={styles.chartGrid} aria-label="Operations charts">
+          <ChartPanel
+            title="Sales trend"
+          >
+            {data.salesAvailable ? <AreaValueChart data={data.charts.salesTrend} /> : <EmptyState text={data.salesError ?? "Sales data unavailable."} />}
+          </ChartPanel>
+
+          <ChartPanel title="Sales by category (before receipt discounts)">
+            {data.salesAvailable ? <PieValueChart data={data.charts.salesByCategory} /> : <EmptyState text={data.salesError ?? "Sales data unavailable."} />}
+          </ChartPanel>
+
+          <ChartPanel title="Stock value">
+            {data.inventoryValueAvailable ? <BarValueChart currency data={data.charts.stockValueByCategory} /> : <EmptyState text={data.inventoryAvailable ? "Inventory cost data incomplete." : "Inventory data unavailable."} />}
+          </ChartPanel>
+
+          <ChartPanel title="Stock transaction counts">
+            {data.transactionsAvailable ? <StockMovementLineChart data={data.charts.stockMovement} /> : <EmptyState text={data.transactionsError ?? "Stock transaction data unavailable."} />}
+          </ChartPanel>
+
+          <ChartPanel title="Payment breakdown">
+            {data.salesAvailable ? <PieValueChart data={data.charts.paymentMethods} /> : <EmptyState text={data.salesError ?? "Sales data unavailable."} />}
+          </ChartPanel>
+
+          <ChartPanel title="Top-selling items">
+            {data.salesAvailable ? <BarValueChart data={data.charts.topItems} /> : <EmptyState text={data.salesError ?? "Sales data unavailable."} />}
+          </ChartPanel>
+
+        </section>
+      </div>
+    </>
+  );
+}
+
+function ChartPanel({
+  children,
+  title,
+}: {
+  children: React.ReactNode;
+  title: string;
+}) {
+  return (
+    <article className={styles.chartPanel}>
+      <div className={styles.chartHeader}>
+        <h2>{title}</h2>
+      </div>
+      <div className={styles.chartBox}>{children}</div>
+    </article>
+  );
+}
+
+function AreaValueChart({ data }: { data: DashboardPoint[] }) {
+  if (data.length === 0) {
+    return <EmptyState text="No sales data for this range." />;
+  }
+
+  return (
+    <ResponsiveContainer height="100%" width="100%">
+      <AreaChart data={data}>
+        <defs>
+          <linearGradient id="salesArea" x1="0" x2="0" y1="0" y2="1">
+            <stop offset="5%" stopColor="var(--chart-series-1)" stopOpacity={0.24} />
+            <stop offset="95%" stopColor="var(--chart-series-1)" stopOpacity={0} />
+          </linearGradient>
+        </defs>
+        <CartesianGrid stroke="var(--chart-grid)" vertical={false} />
+        <XAxis axisLine={false} dataKey="label" tick={{ fill: "var(--chart-axis)", fontSize: 11 }} tickLine={false} />
+        <YAxis axisLine={false} tick={{ fill: "var(--chart-axis)", fontSize: 11 }} tickFormatter={(value) => formatCurrency(Number(value))} tickLine={false} width={54} />
+        <Tooltip content={<ChartTooltip currency />} cursor={{ stroke: "var(--chart-cursor)", strokeWidth: 1 }} />
+        <Area dataKey="value" fill="url(#salesArea)" stroke="var(--chart-series-1)" strokeWidth={2} type="monotone" />
+      </AreaChart>
+    </ResponsiveContainer>
+  );
+}
+
+function BarValueChart({ currency = false, data }: { currency?: boolean; data: DashboardPoint[] }) {
+  if (data.length === 0) {
+    return <EmptyState text="No matching records yet." />;
+  }
+
+  return (
+    <ResponsiveContainer height="100%" width="100%">
+      <BarChart data={data}>
+        <CartesianGrid stroke="var(--chart-grid)" vertical={false} />
+        <XAxis axisLine={false} dataKey="label" tick={{ fill: "var(--chart-axis)", fontSize: 11 }} tickLine={false} />
+        <YAxis axisLine={false} tick={{ fill: "var(--chart-axis)", fontSize: 11 }} tickFormatter={(value) => currency ? formatCurrency(Number(value)) : String(value)} tickLine={false} width={54} />
+        <Tooltip content={<ChartTooltip currency={currency} />} cursor={{ fill: "var(--chart-cursor)" }} />
+        <Bar dataKey="value" radius={[8, 8, 0, 0]}>
+          {data.map((entry, index) => (
+            <Cell
+              fill={chartFillColors[index % chartFillColors.length]}
+              key={entry.label}
+              stroke={chartColors[index % chartColors.length]}
+              strokeWidth={1}
+            />
+          ))}
+        </Bar>
+      </BarChart>
+    </ResponsiveContainer>
+  );
+}
+
+function PieValueChart({ data }: { data: DashboardPoint[] }) {
+  if (data.length === 0) {
+    return <EmptyState text="No matching records yet." />;
+  }
+
+  const total = data.reduce((sum, entry) => sum + Number(entry.value), 0);
+
+  return (
+    <div className={styles.pieChartLayout}>
+      <div className={styles.pieChartGraphic}>
+        <ResponsiveContainer height="100%" width="100%">
+          <PieChart>
+            <Tooltip content={<ChartTooltip currency />} />
+            <Pie
+              cx="50%"
+              cy="50%"
+              data={data}
+              dataKey="value"
+              innerRadius={52}
+              nameKey="label"
+              outerRadius={82}
+              paddingAngle={data.length > 1 ? 3 : 0}
+            >
+              {data.map((entry, index) => (
+                <Cell
+                  fill={chartFillColors[index % chartFillColors.length]}
+                  key={entry.label}
+                  stroke={chartColors[index % chartColors.length]}
+                  strokeWidth={1}
+                />
+              ))}
+            </Pie>
+          </PieChart>
+        </ResponsiveContainer>
+        <div className={styles.pieChartCenter}>
+          <span>Total</span>
+          <strong>{formatCurrency(total)}</strong>
+        </div>
+      </div>
+
+      <div aria-label="Chart breakdown" className={styles.pieLegend}>
+        {data.map((entry, index) => {
+          const percentage = total > 0 ? (Number(entry.value) / total) * 100 : 0;
+
+          return (
+            <div className={styles.pieLegendItem} key={entry.label}>
+              <span
+                aria-hidden="true"
+                className={styles.pieLegendSwatch}
+                style={{
+                  background: chartFillColors[index % chartFillColors.length],
+                  borderColor: chartColors[index % chartColors.length],
+                }}
+              />
+              <div className={styles.pieLegendLabel}>
+                <span>{entry.label}</span>
+                <small>{percentage.toLocaleString(undefined, { maximumFractionDigits: 1 })}%</small>
+              </div>
+              <strong>{formatCurrency(Number(entry.value))}</strong>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function StockMovementLineChart({ data }: { data: StockMovementPoint[] }) {
+  if (data.length === 0) {
+    return <EmptyState text="No stock movement in this range." />;
+  }
+
+  return (
+    <ResponsiveContainer height="100%" width="100%">
+      <LineChart data={data}>
+        <CartesianGrid stroke="var(--chart-grid)" vertical={false} />
+        <XAxis axisLine={false} dataKey="label" tick={{ fill: "var(--chart-axis)", fontSize: 11 }} tickLine={false} />
+        <YAxis axisLine={false} tick={{ fill: "var(--chart-axis)", fontSize: 11 }} tickLine={false} width={42} />
+        <Tooltip content={<ChartTooltip />} cursor={{ stroke: "var(--chart-cursor)", strokeWidth: 1 }} />
+        <Line activeDot={{ r: 4 }} dataKey="in" dot={{ r: 2 }} stroke="var(--chart-series-1)" strokeWidth={1.8} type="monotone" />
+        <Line activeDot={{ r: 4 }} dataKey="out" dot={{ r: 2 }} stroke="var(--chart-series-6)" strokeWidth={1.8} type="monotone" />
+        <Line activeDot={{ r: 4 }} dataKey="adjustment" dot={{ r: 2 }} stroke="var(--chart-series-2)" strokeWidth={1.8} type="monotone" />
+      </LineChart>
+    </ResponsiveContainer>
+  );
+}
+
+function ChartTooltip({
+  active,
+  currency = false,
+  label,
+  payload,
+}: {
+  active?: boolean;
+  currency?: boolean;
+  label?: string;
+  payload?: Array<{ name: string; value: number }>;
+}) {
+  if (!active || !payload?.length) {
+    return null;
+  }
+
+  return (
+    <div className={styles.chartTooltip}>
+      <strong>{label ?? payload[0]?.name}</strong>
+      {payload.map((item) => (
+        <span key={item.name}>
+          {item.name}: {currency ? formatCurrency(Number(item.value)) : item.value}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function EmptyState({ text }: { text: string }) {
+  return (
+    <div className={styles.emptyState}>
+      <span className="mono">--</span>
+      <p>{text}</p>
+    </div>
+  );
+}

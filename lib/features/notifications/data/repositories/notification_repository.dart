@@ -1,0 +1,257 @@
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+
+import '../../../../core/constants/app_routes.dart';
+import '../../../../core/constants/database_tables.dart';
+import '../../../../core/services/supabase_service.dart';
+import '../models/notification_model.dart';
+
+class NotificationRepository {
+  const NotificationRepository(this._client);
+
+  final SupabaseClient _client;
+
+  Stream<List<SeedRoverNotification>> watchNotifications() {
+    return _client
+        .from(DatabaseTables.notifications)
+        .stream(primaryKey: ['id'])
+        .order('created_at')
+        .map(
+          (rows) => rows
+              .map((row) => _notificationFromRow(row))
+              .where(_isUserFacingNotification)
+              .toList(growable: false),
+        );
+  }
+
+  Future<List<SeedRoverNotification>> getNotifications() async {
+    final rows = await _client
+        .from(DatabaseTables.notifications)
+        .select(
+          '*, actor:profiles!notifications_actor_id_fkey(first_name,last_name,full_name)',
+        )
+        .order('created_at', ascending: false) as List<dynamic>;
+
+    return rows
+        .map((row) => _notificationFromRow(row as Map<String, dynamic>))
+        .where(_isUserFacingNotification)
+        .toList(growable: false);
+  }
+
+  bool _isUserFacingNotification(SeedRoverNotification notification) {
+    final title = notification.title.trim().toLowerCase();
+    final message = notification.shortDescription.trim().toLowerCase();
+
+    return !{
+          'login',
+          'logout',
+          'web login',
+          'web logout',
+          'notification read',
+          'notification deleted',
+        }.contains(title) &&
+        !message.contains('signed in') &&
+        !message.contains('signed out');
+  }
+
+  Future<void> markAsRead(String notificationId) async {
+    await _client
+        .from(DatabaseTables.notifications)
+        .update({'is_read': true}).eq('id', notificationId);
+    await _recordActivity('Notification Read');
+  }
+
+  Future<void> markAsUnread(String notificationId) async {
+    await _client
+        .from(DatabaseTables.notifications)
+        .update({'is_read': false}).eq('id', notificationId);
+  }
+
+  Future<void> markAllAsRead(Iterable<String> notificationIds) async {
+    final ids = notificationIds.toList(growable: false);
+    if (ids.isEmpty) return;
+
+    await _client
+        .from(DatabaseTables.notifications)
+        .update({'is_read': true}).inFilter('id', ids);
+  }
+
+  Future<void> deleteNotifications(Iterable<String> notificationIds) async {
+    final ids = notificationIds.toList(growable: false);
+    if (ids.isEmpty) return;
+
+    await _client
+        .from(DatabaseTables.notifications)
+        .delete()
+        .inFilter('id', ids);
+  }
+
+  Future<void> deleteNotification(String notificationId) async {
+    await _client
+        .from(DatabaseTables.notifications)
+        .delete()
+        .eq('id', notificationId);
+  }
+
+  SeedRoverNotification _notificationFromRow(Map<String, dynamic> row) {
+    final type = row['notification_type'] as String? ?? 'System';
+    final route = row['action_route'] as String? ?? AppRoutes.notifications;
+    final actorName = _displayName(row['actor']);
+
+    return SeedRoverNotification(
+      id: row['id'] as String,
+      title: row['title'] as String? ?? 'SeedRover Notification',
+      shortDescription: row['message'] as String? ?? '',
+      fullDescription: row['message'] as String? ?? '',
+      category: _categoryFromDb(type),
+      priority: _priorityFromTitle(row['title'] as String? ?? '', type),
+      createdAt: _parseDate(row['created_at']) ?? DateTime.now(),
+      triggeredBy: type,
+      relatedModule: _relatedModuleFromRoute(route, type),
+      relatedId: _relatedIdFromRoute(route),
+      relatedItem: row['title'] as String?,
+      actionRoute: route,
+      actorName: actorName,
+      isRead: row['is_read'] as bool? ?? false,
+    );
+  }
+
+  String? _displayName(Object? value) {
+    if (value is List && value.isNotEmpty) {
+      return _displayName(value.first);
+    }
+
+    if (value is! Map) {
+      return null;
+    }
+
+    final firstName = (value['first_name'] as String?)?.trim();
+    final lastName = (value['last_name'] as String?)?.trim();
+    final fullName = (value['full_name'] as String?)?.trim() ?? '';
+    final nameParts = fullName
+        .split(RegExp(r'\s+'))
+        .where((part) => part.isNotEmpty)
+        .toList();
+    final resolvedFirstName = (firstName?.isNotEmpty == true)
+        ? firstName!
+        : nameParts.isNotEmpty
+            ? nameParts.first
+            : null;
+    final resolvedLastName = (lastName?.isNotEmpty == true)
+        ? lastName!
+        : nameParts.length > 1
+            ? nameParts.last
+            : null;
+
+    if (resolvedFirstName == null) {
+      return null;
+    }
+
+    return resolvedLastName == null || resolvedLastName.isEmpty
+        ? resolvedFirstName
+        : '$resolvedFirstName ${resolvedLastName[0].toUpperCase()}.';
+  }
+
+  Future<void> _recordActivity(String activity) async {
+    await _client.from(DatabaseTables.activityLogs).insert({
+      'user_id': _client.auth.currentUser?.id,
+      'activity': activity,
+      'description': 'Notification status updated.',
+      'module': 'Notifications',
+    });
+  }
+
+  NotificationCategory _categoryFromDb(String type) {
+    return switch (type) {
+      'Inventory' => NotificationCategory.inventory,
+      'Robot Status' => NotificationCategory.robot,
+      'Crop Reminder' => NotificationCategory.cropMonitoring,
+      _ => NotificationCategory.system,
+    };
+  }
+
+  NotificationPriority _priorityFromTitle(String title, String type) {
+    final normalizedTitle = title.toLowerCase();
+
+    if (normalizedTitle.contains('emergency') ||
+        normalizedTitle.contains('out of stock')) {
+      return NotificationPriority.critical;
+    }
+
+    if (normalizedTitle.contains('low')) {
+      return NotificationPriority.high;
+    }
+
+    if (type == 'System') {
+      return NotificationPriority.low;
+    }
+
+    return NotificationPriority.medium;
+  }
+
+  NotificationRelatedModule _relatedModuleFromRoute(String route, String type) {
+    final normalizedRoute = route.trim().toLowerCase();
+
+    if (normalizedRoute.startsWith(AppRoutes.stocks) ||
+        normalizedRoute == '/inventory') {
+      return NotificationRelatedModule.inventory;
+    }
+
+    if (normalizedRoute.startsWith(AppRoutes.crops)) {
+      return NotificationRelatedModule.crops;
+    }
+
+    if (normalizedRoute.startsWith(AppRoutes.rover) ||
+        normalizedRoute == '/rover-monitor') {
+      return type == 'Camera'
+          ? NotificationRelatedModule.camera
+          : NotificationRelatedModule.rover;
+    }
+
+    if (normalizedRoute.startsWith('/users')) {
+      return NotificationRelatedModule.users;
+    }
+
+    if (normalizedRoute.startsWith('/planting-logs')) {
+      return NotificationRelatedModule.planting;
+    }
+
+    if (normalizedRoute.startsWith(AppRoutes.dashboard)) {
+      return NotificationRelatedModule.dashboard;
+    }
+
+    return _relatedModuleFromType(type);
+  }
+
+  NotificationRelatedModule _relatedModuleFromType(String type) {
+    return switch (type) {
+      'Inventory' => NotificationRelatedModule.inventory,
+      'Crop Reminder' => NotificationRelatedModule.crops,
+      'Robot Status' => NotificationRelatedModule.rover,
+      'Camera' => NotificationRelatedModule.camera,
+      _ => NotificationRelatedModule.system,
+    };
+  }
+
+  String? _relatedIdFromRoute(String route) {
+    final parts = route.split('/').where((part) => part.isNotEmpty).toList();
+
+    if (parts.length < 2) {
+      return null;
+    }
+
+    return parts.last;
+  }
+
+  DateTime? _parseDate(Object? value) {
+    if (value == null) {
+      return null;
+    }
+
+    return DateTime.tryParse(value.toString())?.toLocal();
+  }
+}
+
+final notificationRepositoryProvider = Provider<NotificationRepository>(
+  (ref) => NotificationRepository(ref.watch(supabaseClientProvider)),
+);

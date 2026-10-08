@@ -1,0 +1,711 @@
+# SeedRover Database Specification
+
+Version: 1.0
+
+This document defines the official database architecture for the SeedRover mobile application.
+
+All database structures, relationships, and constraints must follow this specification.
+
+Generate the database using Supabase PostgreSQL.
+
+The schema must be normalized to at least Third Normal Form (3NF).
+
+Do not introduce additional tables unless explicitly approved.
+
+---
+
+# Database Design Principles
+
+The database should be simple, scalable, and maintainable.
+
+General Rules
+
+- Use UUID as the primary key for every table.
+- Use timestamptz for timestamps.
+- Every table must contain:
+  - id
+  - created_at
+  - updated_at
+- Maintain proper foreign key relationships.
+- Prevent unnecessary duplication of data.
+- Follow PostgreSQL and Supabase best practices.
+- Prepare the database for future expansion without implementing future features.
+
+---
+
+# Authentication
+
+Authentication uses Supabase Auth.
+
+Each authenticated account must have a corresponding profile record.
+
+Application data should reference the profile table instead of auth.users whenever possible.
+
+---
+
+# Tables
+
+## 1. profiles
+
+Purpose
+
+Stores user information for all authenticated users.
+
+Fields
+
+- id (UUID, references auth.users.id)
+- username
+- email
+- full_name
+- profile_image_path
+- role_id
+- is_active
+- created_at
+- updated_at
+
+Relationships
+
+- belongs to roles
+
+Notes
+
+Username must be unique.
+
+Profile pictures must be stored in Supabase Storage bucket `profile-images`.
+The `profiles.profile_image_path` field stores only the Storage object path.
+
+---
+
+## 2. roles
+
+Purpose
+
+Stores the official user roles.
+
+Default Roles
+
+- System Administrator
+- Farm Planting Manager
+- Farm Inventory Manager
+- Farm Staff
+
+Fields
+
+- id
+- role_name
+- description
+- created_at
+- updated_at
+
+Relationships
+
+- one role
+- many profiles
+
+---
+
+## 3. robot_status
+
+Purpose
+
+Stores the current operational status of the SeedRover prototype.
+
+Since the project only supports one robotic unit, only one active record is required.
+
+Fields
+
+- id
+- rover_status
+- wifi_connected
+- bluetooth_connected
+- camera_connected
+- current_activity
+- speed
+- emergency_stop
+- last_updated
+
+Examples
+
+Connection
+
+Connected
+
+Current Activity
+
+Idle
+
+Planting
+
+Monitoring
+
+Offline
+
+---
+
+## 4. sensor_readings
+
+Purpose
+
+Stores historical sensor readings collected by the robotic unit.
+
+Fields
+
+- id
+- soil_moisture
+- soil_temperature
+- humidity
+- environmental_temperature
+- soil_raw
+- calibrated_value
+- provenance_status
+- soil_moisture_calibrated
+- calibration_version
+- firmware_version
+- source
+- recorded_at
+- created_at
+
+Notes
+
+Preserve uncertain historical samples as unverified. Only fresh verified
+hardware samples feed current values, trends, or sensor-based recommendations.
+The soil-moisture percentage is unavailable unless the probe's calibration
+status and version are recorded. Keep raw ADC values explicitly labeled as raw.
+Null represents missing, stale, invalid, or uncalibrated values; never replace
+it with zero. `recorded_at` represents capture time rather than cloud sync time.
+
+---
+
+## 5. planting_logs
+
+Purpose
+
+Stores every planting activity performed using SeedRover.
+
+Fields
+
+- id
+- operator_id
+- crop_name
+- planting_date
+- planting_time
+- planting_status
+- notes
+- created_at
+- updated_at
+
+Relationships
+
+- operator_id references profiles
+
+Examples:
+
+Pending
+
+In Progress
+
+Completed
+
+Cancelled
+
+---
+
+## 6. crops
+
+Purpose
+
+Stores planted crop records for monitoring.
+
+Fields
+
+- id
+- planting_log_id
+- crop_name
+- assigned_manager
+- planting_date
+- estimated_harvest
+- growth_stage
+- maintenance_notes
+- crop_status
+- created_at
+- updated_at
+
+Relationships
+
+- planting_log_id references planting_logs
+- references profiles
+
+Examples
+
+Growth Stage
+
+Seeded
+
+Germinating
+
+Vegetative
+
+Flowering
+
+Harvest Ready
+
+Completed
+
+---
+
+## 7. inventory
+
+Purpose
+
+Stores all available planting materials.
+
+Fields
+
+- id
+- stock_code
+- item_name
+- quantity
+- unit
+- minimum_quantity
+- unit_cost
+- selling_price
+- image_path
+- storage_location
+- updated_by
+- created_at
+- updated_at
+- category
+
+Relationships
+
+- updated_by references profiles
+- image_path references a file path in Supabase Storage bucket `stock-images`
+- unit_cost and selling_price are optional nonnegative pricing values
+
+Examples
+
+Item
+
+Peanut Seeds
+
+Sitaw Seeds
+
+Calamansi Seeds
+
+Examples
+
+Seeds
+
+Tools
+
+Fertilizer
+
+Consumables
+
+Hardware
+
+---
+
+## 8. inventory_transactions
+
+Purpose
+
+Stores inventory movement history.
+
+Fields
+
+- id
+- inventory_id
+- transaction_type
+- quantity
+- remarks
+- performed_by
+- source
+- source_id
+- created_at
+
+Relationships
+
+- inventory_id references inventory
+- performed_by references profiles
+
+Transaction Types
+
+- IN
+- OUT
+- ADJUSTMENT
+
+Source Types
+
+- manual
+- sale
+- void_sale
+
+Rules
+
+- Sale deductions must be linked to a sales transaction through source and source_id.
+
+---
+
+## 8.1 sales_transactions
+
+Purpose
+
+Stores inventory sales recorded from the Stocks module.
+
+Fields
+
+- id
+- inventory_id
+- quantity_sold
+- unit_price
+- total_amount
+- sale_date
+- customer_name
+- remarks
+- recorded_by
+- status
+- voided_at
+- voided_by
+- void_reason
+- created_at
+- updated_at
+
+Relationships
+
+- inventory_id references inventory
+- recorded_by references profiles
+- voided_by references profiles
+
+Status Values
+
+- Completed
+- Voided
+
+Rules
+
+- Sales must be recorded through the database function `record_inventory_sale`.
+- Recording a sale must deduct inventory, create an inventory transaction, write an activity log, and create stock-status notifications in one atomic operation.
+- Quantity sold must be greater than zero.
+- Unit price and total amount must not be negative.
+- A sale cannot reduce inventory below zero.
+- Completed sale financial fields must not be directly edited.
+
+---
+
+## 9. notifications
+
+Purpose
+
+Stores notifications displayed inside the application.
+
+Fields
+
+- id
+- recipient_id
+- title
+- message
+- notification_type
+- is_read
+- created_at
+- action_route
+
+Relationships
+
+- recipient_id references profiles
+
+Notification Types
+
+- Inventory
+- Robot Status
+- Crop Reminder
+- System
+
+Example of action route:
+
+/dashboard
+
+/inventory
+
+/robot
+
+/profile
+---
+
+## 10. activity_logs
+
+Purpose
+
+Stores important user and system activities.
+
+Fields
+
+- id
+- user_id
+- activity
+- description
+- created_at
+- module
+
+Relationships
+
+- user_id references profiles
+
+Examples
+
+User Login
+
+Inventory Updated
+
+Planting Completed
+
+User Created
+
+Password Reset
+
+Robot Connected
+
+Robot Disconnected
+
+Example module:
+Inventory
+
+Robot
+
+Authentication
+
+Planting
+
+Users
+
+## 11. robot_commands
+
+Purpose
+
+Stores commands sent to the rover.
+
+Fields
+
+- id
+
+- command
+
+- issued_by
+
+- status
+
+- executed_at
+
+- created_at
+
+Examples
+
+MOVE_FORWARD
+
+TURN_LEFT
+
+STOP
+
+START_PLANTING
+
+RETURN_HOME
+
+---
+
+# Database Relationships
+
+roles (1)
+    │
+    └───────────< profiles (Many)
+
+profiles (1)
+    │
+    └───────────< planting_logs (Many)
+
+planting_logs (1)
+    │
+    └───────────< crops (Many)
+
+inventory (1)
+    │
+    └───────────< inventory_transactions (Many)
+
+profiles (1)
+    │
+    ├───────────< notifications
+    ├───────────< activity_logs
+    ├───────────< inventory_transactions
+    └───────────< planting_logs
+
+---
+
+# User Role Responsibilities
+
+## System Administrator
+
+Permissions
+
+- Full system access
+- Create user accounts
+- Generate usernames
+- Generate temporary passwords
+- Reset passwords
+- Edit user information
+- Activate or deactivate accounts
+- Assign user roles
+- View all modules
+- Manage system settings
+
+---
+
+## Farm Planting Manager
+
+Permissions
+
+- Dashboard
+- Plant Module
+- Crop Monitoring
+- Sensor Monitoring
+- Planting Logs
+- Notifications
+
+---
+
+## Farm Inventory Manager
+
+Permissions
+
+- Dashboard
+- Inventory Management
+- Inventory Transactions
+- Notifications
+
+---
+
+## Farm Staff
+
+Permissions
+
+Farm Staff access depends on the role assigned by the System Administrator.
+
+The application should restrict visible pages according to the assigned role.
+
+Farm Staff should only access modules necessary for their assigned responsibilities.
+
+---
+
+# Row Level Security (RLS)
+
+Implement Row Level Security for all tables.
+
+Requirements
+
+- Anonymous users cannot access data.
+- Authenticated users must log in before accessing the application.
+- Users may only access information permitted by their assigned role.
+- System Administrators have unrestricted access.
+- Managers should only access records related to their assigned module.
+- Farm Staff should only access records required for their assigned permissions.
+- Future permission expansion should not require restructuring the database.
+---
+
+# Constraints
+
+Implement the following constraints.
+
+Profiles
+
+- Username must be unique.
+
+Roles
+
+- Role name must be unique.
+
+Robot Status
+
+Sensor Readings
+
+- Soil moisture must be between 0 and 100.
+
+Inventory
+
+- Quantity cannot be negative.
+
+Notifications
+
+- is_read defaults to false.
+
+---
+
+# Database Indexes
+
+Create indexes for the following fields.
+
+profiles
+
+- username
+- role_id
+
+sensor_readings
+
+- recorded_at
+
+planting_logs
+
+- planting_date
+
+crops
+
+- crop_name
+
+inventory
+
+- item_name
+
+notifications
+
+- recipient_id
+
+activity_logs
+
+- user_id
+
+---
+
+# Future Expansion
+
+The database architecture should be prepared for future features without implementing them now.
+
+Future Features
+
+- Multiple robotic units
+- Communication history
+- GPS location tracking
+- ESP32 Camera recordings
+- AI crop recommendations
+- Weather API integration
+- Predictive analytics
+
+These features should NOT be implemented during the initial development.
+
+---
+
+# Instructions for Codex
+
+Generate the following automatically.
+
+- SQL migration files
+- PostgreSQL schema
+- Foreign key relationships
+- Constraints
+- Indexes
+- Row Level Security policies
+- Seed data for default roles
+
+Use Supabase best practices.
+
+Do not generate Flutter code until the database schema has been completed and reviewed.
+
+Avoid unnecessary complexity.
+
+Prioritize readability, maintainability, and scalability.
